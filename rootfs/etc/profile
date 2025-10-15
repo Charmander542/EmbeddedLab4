@@ -1,0 +1,11 @@
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+if [ "$PS1" ]; then
+    export PS1="\h:\w\\$ "
+    export USER=`whoami`
+    export LOGNAME=$USER
+    export HOSTNAME=`cat /etc/hostname`
+    export HISTSIZE=100
+    export HISTFILESIZE=100
+    export PAGER='/bin/more '
+fi;
+

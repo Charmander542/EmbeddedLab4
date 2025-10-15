@@ -1,0 +1,22 @@
+Welcome to the EC535 Stock+ Image v1.0!
+
+The stock package includes a working kernel image, rootfs.img, 
+and rootfs source directory (in stockplus-rootfs.tar.gz). The rootfs
+has been preloaded with a precompiled version of busybox. The 
+kernel and the busybox binaries provided in this package were
+configured with the goal of balancing size and usability.
+
+Since this is the "plus" stock image, we also include some
+additional tools, such as lrzsz for file transfer, and micropython,
+a Python interpreter for embedded systems. We've also configured
+kernel log messages to go to /var/log/messages (instead of direct
+to your console). We hope you find these changes useful!
+
+You may use this stock image for assignments where configuring
+the kernel, the rootfs, and/or busybox are NOT part of the main
+goals. If you have any questions, please contact your
+instructor or a TA.
+
+Have fun!
+
+-- EC535 Teaching Staff

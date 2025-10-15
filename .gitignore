@@ -1,0 +1,11 @@
+# Ignore SSH/private key folders
+keys/
+keys/*
+
+# Ignore image files
+bootfs.img
+rootfs.img
+sdcard.img
+
+# (Optional) Ignore all .img files if you might generate others
+#i.img

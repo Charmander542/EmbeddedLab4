@@ -1,0 +1,21 @@
+# Essential mounts and hostname-setting
+::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/mount -t sysfs sysfs /sys
+::sysinit:/bin/mount -o remount,rw /
+::sysinit:/bin/hostname -F /etc/hostname
+::once:/bin/mount -t vfat -r /dev/mmcblk0p1 /boot
+
+# Logging
+::wait:/sbin/syslogd -S -D -O /var/log/messages
+::wait:/sbin/klogd -c 2
+
+# Consoles/TTYs
+tty1::askfirst:/sbin/getty 38400 tty1 # Virtual Console 1 (e.g., HDMI)
+tty2::askfirst:/sbin/getty 38400 tty2 # Virtual Console 2
+::once:/sbin/getty -L ttyS0 115200 vt100 # BeagleBone Serial/UART 
+::once:/sbin/getty -L ttyAMA0 115200 vt100 # QEMU Serial
+
+# Shutdown
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/sync
+::shutdown:/bin/umount -a -r
