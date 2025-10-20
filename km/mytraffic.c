@@ -15,38 +15,36 @@
 
 #define DEVICE_NAME "mytraffic"
 #define STATIC_MAJOR 61
+#define DEBOUNCE_MS 200
 
 
-// Timer structure
-struct my_timer_info {
-    struct timer_list timer;
-    pid_t user_pid;
-    char user_msg[MAX_MSG_LEN];
-    char user_cmd[TASK_COMM_LEN];
-    unsigned long expiration_jiffies;
-    int active;
-};
-
-static struct my_timer_info timers[MAX_TIMERS];
-static unsigned long module_start_jiffies;
-static char update_response[256] = {0};  // Response for timer updates
 static int mode = 1; //Operational Mode. 1: Normal 2: Flashing-Red 3: Flashing-Yellow
 static int cycle_length = 1; //Cycle Length
+static unsigned int cycle_counter = 0; //Counter for cycles
 static int red = 1; //Red Light Status. 1: ON 0: OFF
 static int yellow = 0; //Yellow Light Status. 1: ON 0: OFF
 static int green = 0; //Green Light Status. 1: ON 0: OFF
 static int pedestrian = 0; //Pedestrian Status. 1: Present 0: NOT Present
 
+static int last_btn0_jiffies = 0;
+static int last_btn1_jiffies = 0;
+
 static int gpio_red = 67;      
 static int gpio_yellow = 68;   
-static int gpio_green = 69;    
+static int gpio_green = 44;    
 static int gpio_btn0 = 26;     //  (mode switch)
-static int gpio_btn1 = 27;     //  (pedestrian)
-module_param(gpio_red, int, 0444);
-module_param(gpio_yellow, int, 0444);
-module_param(gpio_green, int, 0444);
-module_param(gpio_btn0, int, 0444);
-module_param(gpio_btn1, int, 0444);
+static int gpio_btn1 = 46;     //  (pedestrian)
+
+/* gpio descriptors */
+static struct gpio_desc *gdesc_green;
+static struct gpio_desc *gdesc_yellow;
+static struct gpio_desc *gdesc_red;
+static struct gpio_desc *gdesc_btn_0;
+static struct gpio_desc *gdesc_btn_1;
+
+/* IRQ number for button */
+static int btn0_irq = -1;
+static int btn1_irq = -1;
 
 
 /* Button IRQ handlers (edges) */
@@ -59,6 +57,7 @@ static irqreturn_t btn0_isr(int irq, void *dev_id)
 
     /* Cycle modes */
     mutex_lock(&state_lock);
+    cycle_counter = 0;
     if (cur_mode == MODE_NORMAL) cur_mode = MODE_FLASH_RED;
     else if (cur_mode == MODE_FLASH_RED) cur_mode = MODE_FLASH_YELLOW;
     else cur_mode = MODE_NORMAL;
@@ -83,91 +82,42 @@ static irqreturn_t btn1_isr(int irq, void *dev_id)
     return IRQ_HANDLED;
 }
 
-static int traffic_thread_fn(void *data)
-{
-    while (!kthread_should_stop()) {
-        int local_hz;
-        enum mode_t local_mode;
-        bool local_pedestrian;
+static void set_leds(bool red_on, bool yellow_on, bool green_on) {
+    gpio_set_value(gdesc_red, red_on ? 1 : 0);
+    gpio_set_value(gdesc_yellow, yellow_on ? 1 : 0);
+    gpio_set_value(gdesc_green, green_on ? 1 : 0);
+}
 
-        /* Snapshot state */
-        mutex_lock(&state_lock);
-        local_hz = cycle_hz;
-        local_mode = cur_mode;
-        local_pedestrian = pedestrian_requested;
-        mutex_unlock(&state_lock);
+static void update_traffic_lights(void) {
+    mutex_lock(&state_lock);
+    unsigned int idx;
+    bool g = false, y = false, r = false;
 
-        if (local_hz < 1) local_hz = 1;
-        if (local_hz > 9) local_hz = 9;
-
-        /* cycle length in ms */
-        unsigned int cycle_ms = 1000 / local_hz;
-
-        if (local_mode == MODE_NORMAL) {
-            /* Normal: green 3 cycles, yellow 1 cycle, red 2 cycles,
-               BUT if pedestrian_requested then next stop phase (red) becomes red+yellow for 5 cycles. */
-            int i;
-
-            /* GREEN for 3 cycles */
-            for (i = 0; i < 3; ++i) {
-                set_leds(false, false, true);
-                if (kthread_should_stop()) goto out;
-                msleep(cycle_ms);
-            }
-
-            /* YELLOW for 1 cycle */
-            set_leds(false, true, false);
-            if (kthread_should_stop()) goto out;
-            msleep(cycle_ms);
-
-            /* RED or RED+YELLOW stop phase */
-            mutex_lock(&state_lock);
-            bool do_ped = pedestrian_requested;
-            if (do_ped) pedestrian_requested = false; /* consume */
-            mutex_unlock(&state_lock);
-
-            if (do_ped) {
-                /* Massachusetts-style "stop": both red+yellow for 5 cycles */
-                for (i = 0; i < 5; ++i) {
-                    set_leds(true, true, false);
-                    if (kthread_should_stop()) goto out;
-                    msleep(cycle_ms);
-                }
-            } else {
-                /* RED for 2 cycles */
-                for (i = 0; i < 2; ++i) {
-                    set_leds(true, false, false);
-                    if (kthread_should_stop()) goto out;
-                    msleep(cycle_ms);
-                }
-            }
-        } else if (local_mode == MODE_FLASH_RED) {
-            /* flash red 1 cycle on, 1 cycle off continuously */
-            set_leds(true, false, false);
-            if (kthread_should_stop()) break;
-            msleep(cycle_ms);
-            set_leds(false, false, false);
-            if (kthread_should_stop()) break;
-            msleep(cycle_ms);
-        } else if (local_mode == MODE_FLASH_YELLOW) {
-            /* flash yellow 1 cycle on, 1 cycle off continuously */
-            set_leds(false, true, false);
-            if (kthread_should_stop()) break;
-            msleep(cycle_ms);
-            set_leds(false, false, false);
-            if (kthread_should_stop()) break;
-            msleep(cycle_ms);
-        } else {
-            /* unknown mode: sleep briefly */
-            set_leds(false, false, false);
-            msleep(200);
-        }
+    switch (cur_mode) {
+    case MODE_NORMAL:
+        idx = cycle_counter % 6; // 3 green, 1 yellow, 2 red
+        if (idx <= 2) g = true;
+        else if (idx == 3) y = true;
+        else r = true;
+        break;
+    case MODE_FLASH_RED:
+        r = (cycle_counter & 1) ? true : false;
+        break;
+    case MODE_FLASH_YELLOW:
+        y = (cycle_counter & 1) ? true : false;
+        break;
     }
 
-out:
-    /* Ensure lights off on thread stop */
-    set_leds(false, false, false);
-    return 0;
+    set_leds(r, y, g);
+    mutex_unlock(&state_lock);
+}
+
+static void timer_cb(struct timer_list *t) {
+    cycle_counter++;
+    update_traffic_lights();
+
+    /* Restart timer */
+    mod_timer(&tick_timer, jiffies + msecs_to_jiffies(1000 / cycle_length));
 }
 
 // Forward declarations
@@ -184,25 +134,6 @@ static struct file_operations fops = {
     .open = mytraffic_open,
 };
 
-// Timer callback
-void timer_callback(struct timer_list *t) {
-    int i;
-    
-    // Find which timer expired
-    for (i = 0; i < MAX_TIMERS; i++) {
-        if (&timers[i].timer == t && timers[i].active) {
-            if (timers[i].async_queue)
-                kill_fasync(&timers[i].async_queue, SIGIO, POLL_IN);
-
-            // Clear the expired timer
-            timers[i].active = 0;
-            timers[i].user_pid = 0;
-            timers[i].user_msg[0] = '\0';
-            timers[i].user_cmd[0] = '\0';
-            break;
-        }
-    }
-}
 
 // Character device open
 static int mytraffic_open(struct inode *inode, struct file *file) {
@@ -262,7 +193,7 @@ static ssize_t mytraffic_write(struct file *filp, const char __user *buf, size_t
     }
 
     mutex_lock(&state_lock);
-    cycle_hz = (int)val;
+    cycle_length = (int)val;
     mutex_unlock(&state_lock);
 
     return count;
@@ -280,79 +211,43 @@ static int __init mytraffic_init(void) {
     if (cycle_hz > 9) cycle_hz = 9;
 
     /* Request GPIOs for LEDs */
-    if (gpio_request(gpio_red, "mytraffic_red")) {
-        pr_err("mytraffic: failed to request gpio %d (red)\n", gpio_red);
-        ret = -EBUSY; goto fail;
-    }
-    if (gpio_request(gpio_yellow, "mytraffic_yellow")) {
-        pr_err("mytraffic: failed to request gpio %d (yellow)\n", gpio_yellow);
-        ret = -EBUSY; goto free_red;
-    }
-    if (gpio_request(gpio_green, "mytraffic_green")) {
-        pr_err("mytraffic: failed to request gpio %d (green)\n", gpio_green);
-        ret = -EBUSY; goto free_yellow;
-    }
+    gdesc_green = gpio_to_desc(gpio_green);
+    gdesc_yellow = gpio_to_desc(gpio_yellow);
+    gdesc_red = gpio_to_desc(gpio_red);
 
     /* Set as outputs and turn off initially */
-    gpio_direction_output(gpio_red, 0);
-    gpio_direction_output(gpio_yellow, 0);
-    gpio_direction_output(gpio_green, 0);
+    gpiod_direction_output(gdesc_green, 0);
+    gpiod_direction_output(gdesc_yellow, 0);
+    gpiod_direction_output(gdesc_red, 0);
 
-    /* Request button GPIOs */
-    if (gpio_request(gpio_btn0, "mytraffic_btn0")) {
-        pr_err("mytraffic: failed to request gpio %d (btn0)\n", gpio_btn0);
-        ret = -EBUSY; goto free_green;
-    }
-    if (gpio_direction_input(gpio_btn0)) {
-        pr_warn("mytraffic: warning: gpio_direction_input failed for btn0\n");
-    }
-    if (gpio_request(gpio_btn1, "mytraffic_btn1")) {
-        pr_err("mytraffic: failed to request gpio %d (btn1)\n", gpio_btn1);
-        ret = -EBUSY; goto free_btn0;
-    }
-    if (gpio_direction_input(gpio_btn1)) {
-        pr_warn("mytraffic: warning: gpio_direction_input failed for btn1\n");
-    }
+    gdesc_btn_0 = gpio_to_desc(gpio_btn0);
+    gdesc_btn_1 = gpio_to_desc(gpio_btn1);
 
-    /* Map button gpio to IRQs */
-    irq_btn0 = gpio_to_irq(gpio_btn0);
-    if (irq_btn0 < 0) {
-        pr_err("mytraffic: gpio_to_irq failed for btn0\n");
-        ret = irq_btn0; goto free_btn1;
-    }
-    irq_btn1 = gpio_to_irq(gpio_btn1);
-    if (irq_btn1 < 0) {
-        pr_err("mytraffic: gpio_to_irq failed for btn1\n");
-        ret = irq_btn1; goto free_btn1;
-    }
+    gpiod_direction_input(gdesc_btn_0);
+    gpiod_direction_input(gdesc_btn_1);
 
-    /* Request IRQs on falling or rising edges (use both edges to catch presses/releases depending on wiring) */
-    ret = request_irq(irq_btn0, btn0_isr, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, "mytraffic_btn0", NULL);
-    if (ret) {
-        pr_err("mytraffic: request_irq failed for btn0\n");
-        goto free_btn1;
-    }
-    ret = request_irq(irq_btn1, btn1_isr, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, "mytraffic_btn1", NULL);
-    if (ret) {
-        pr_err("mytraffic: request_irq failed for btn1\n");
-        free_irq(irq_btn0, NULL);
-        goto free_btn1;
-    }
+    btn0_irq = gdesc_to_irq(gdesc_btn_0);
+    btn1_irq = gdesc_to_irq(gdesc_btn_1);
 
-    /* Start traffic thread */
-    traffic_thread = kthread_run(traffic_thread_fn, NULL, "mytraffic_thread");
-    if (IS_ERR(traffic_thread)) {
-        pr_err("mytraffic: failed to create traffic thread\n");
-        ret = PTR_ERR(traffic_thread);
-        free_irq(irq_btn1, NULL);
-        free_irq(irq_btn0, NULL);
-        goto free_btn1;
-    }
+    /* Request IRQs for buttons */
+    request_irq(btn0_irq, btn0_isr,
+                IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
+                "mytraffic_btn0", NULL);
+
+    request_irq(btn1_irq, btn1_isr,
+                IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
+                "mytraffic_btn1", NULL);
 
     if (register_chrdev(STATIC_MAJOR, DEVICE_NAME, &fops) < 0) {
         pr_err("Failed to register device with major %d\n", STATIC_MAJOR);
         return -EBUSY;
     }
+
+    spin_lock_irq(&state_lock);
+    cur_mode = MODE_NORMAL;
+    cycle_counter = 0;
+    update_lights_locked();
+    spin_unlock_irq(&state_lock);
 
     pr_info("Traffic module loaded, major=%d\n", STATIC_MAJOR);
 
@@ -362,12 +257,11 @@ static int __init mytraffic_init(void) {
 static void __exit mytraffic_exit(void) {
     int i;
 
-    /* Stop thread */
-    if (traffic_thread) kthread_stop(traffic_thread);
-
     /* Free IRQs */
-    if (irq_btn1 >= 0) free_irq(irq_btn1, NULL);
-    if (irq_btn0 >= 0) free_irq(irq_btn0, NULL);
+    if (btn1_irq >= 0) free_irq(btn1_irq, NULL);
+    if (btn0_irq >= 0) free_irq(btn0_irq, NULL);
+
+    del_timer_sync(&tick_timer);
     
     unregister_chrdev(STATIC_MAJOR, DEVICE_NAME);
     printk(KERN_INFO "mytraffic module unloaded\n");
@@ -376,11 +270,11 @@ static void __exit mytraffic_exit(void) {
     set_leds(false, false, false);
 
     /* Free GPIOs */
-    gpio_free(gpio_btn1);
-    gpio_free(gpio_btn0);
-    gpio_free(gpio_green);
-    gpio_free(gpio_yellow);
-    gpio_free(gpio_red);
+    gpiod_put(gdesc_green);
+    gpiod_put(gdesc_yellow);
+    gpiod_put(gdesc_red);
+    gpiod_put(gdesc_btn_0);
+    gpiod_put(gdesc_btn_1);
 }
 
 module_init(mytraffic_init);
