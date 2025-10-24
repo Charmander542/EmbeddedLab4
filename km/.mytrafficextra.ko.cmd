@@ -1,0 +1,1 @@
+cmd_/ad/eng/users/c/v/cvanhook/EC535/Lab4/km/mytrafficextra.ko := arm-linux-gnueabihf-ld -r  -EL -T ./scripts/module-common.lds -T ./arch/arm/kernel/module.lds  --build-id  -o /ad/eng/users/c/v/cvanhook/EC535/Lab4/km/mytrafficextra.ko /ad/eng/users/c/v/cvanhook/EC535/Lab4/km/mytrafficextra.o /ad/eng/users/c/v/cvanhook/EC535/Lab4/km/mytrafficextra.mod.o ;  true

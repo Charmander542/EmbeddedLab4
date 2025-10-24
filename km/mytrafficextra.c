@@ -44,18 +44,44 @@ static int gpio_btn1 = 46;
 static int irq_btn0 = -1;
 static int irq_btn1 = -1;
 
-static bool red_on = false;
-static bool yellow_on = false;
-static bool green_on = false;
-
-static void set_leds(bool red, bool yellow, bool green)
+static void set_leds(bool red_on, bool yellow_on, bool green_on)
 {
-    red_on = red;
-    yellow_on = yellow;
-    green_on = green;
-    gpio_set_value(gpio_red, red ? 1 : 0);
-    gpio_set_value(gpio_yellow, yellow ? 1 : 0);
-    gpio_set_value(gpio_green, green ? 1 : 0);
+    gpio_set_value(gpio_red, red_on ? 1 : 0);
+    gpio_set_value(gpio_yellow, yellow_on ? 1 : 0);
+    gpio_set_value(gpio_green, green_on ? 1 : 0);
+}
+
+static void check_button_states(void)
+{
+    bool btn0_current = gpio_get_value(gpio_btn0);
+    bool btn1_current = gpio_get_value(gpio_btn1);
+    
+    mutex_lock(&state_lock);
+    
+    // Check for lightbulb check mode (both buttons pressed)
+    if (btn0_current && btn1_current) {
+        if (!lightbulb_check_active) {
+            lightbulb_check_active = true;
+        }
+    }
+    // Check for reset (both buttons released after being pressed)
+    else if (!btn0_current && !btn1_current) {
+        if (lightbulb_check_active) {
+            // Reset to initial state
+            lightbulb_check_active = false;
+            cur_mode = MODE_NORMAL;
+            cycle_hz = 1;
+            cycle_counter = 0;
+            pedestrian_requested = false;
+            pedestrian_stop_active = false;
+            pedestrian_stop_counter = 0;
+        }
+    }
+    
+    btn0_pressed = btn0_current;
+    btn1_pressed = btn1_current;
+    
+    mutex_unlock(&state_lock);
 }
 
 static void update_traffic_lights(void)
@@ -99,39 +125,6 @@ static void update_traffic_lights(void)
     mutex_unlock(&state_lock);
 }
 
-static void check_button_states(void)
-{
-    bool btn0_current = gpio_get_value(gpio_btn0);
-    bool btn1_current = gpio_get_value(gpio_btn1);
-    
-    mutex_lock(&state_lock);
-    
-    // Check for lightbulb check mode (both buttons pressed)
-    if (btn0_current && btn1_current) {
-        if (!lightbulb_check_active) {
-            lightbulb_check_active = true;
-        }
-    }
-    // Check for reset (both buttons released after being pressed)
-    else if (!btn0_current && !btn1_current) {
-        if (lightbulb_check_active) {
-            // Reset to initial state
-            lightbulb_check_active = false;
-            cur_mode = MODE_NORMAL;
-            cycle_hz = 1;
-            cycle_counter = 0;
-            pedestrian_requested = false;
-            pedestrian_stop_active = false;
-            pedestrian_stop_counter = 0;
-        }
-    }
-    
-    btn0_pressed = btn0_current;
-    btn1_pressed = btn1_current;
-    
-    mutex_unlock(&state_lock);
-}
-
 static void timer_cb(struct timer_list *t)
 {
     // Check button states for lightbulb check and reset
@@ -146,7 +139,6 @@ static void timer_cb(struct timer_list *t)
             pedestrian_stop_active = false;
             pedestrian_stop_counter = 0;
             pedestrian_requested = false;
-            cycle_counter = 0;
         }
     } else {
         cycle_counter++;
@@ -208,39 +200,24 @@ static ssize_t mytraffic_read(struct file *file, char __user *buf, size_t len, l
 {
     char response[256];
     int response_len;
-    const char *mode_str;
 
     if (*offset > 0)
         return 0;
-
-    mode_str = (cur_mode == MODE_NORMAL) ? "Normal"
-             : (cur_mode == MODE_FLASH_RED) ? "Flashing-Red"
-             : (cur_mode == MODE_FLASH_YELLOW) ? "Flashing-Yellow"
-             : "Invalid";
 
     response_len = snprintf(response, sizeof(response),
                             "[MODE]: %s\n"
                             "[RATE]: %dHz\n"
                             "[PEDESTRIAN]: %s\n"
-                            "[GREEN]: %s\n"
-                            "[YELLOW]: %s\n"
-                            "[RED]: %s\n",
-                            mode_str,
+                            "[PEDESTRIAN_STOP]: %s\n"
+                            "[LIGHTBULB_CHECK]: %s\n",
+                            cur_mode == MODE_NORMAL ? "Normal"
+                            : cur_mode == MODE_FLASH_RED ? "Flashing-Red"
+                            : cur_mode == MODE_FLASH_YELLOW ? "Flashing-Yellow"
+                                                            : "Invalid",
                             cycle_hz,
                             pedestrian_requested ? "Yes" : "No",
-                            green_on ? "On" : "Off",
-                            yellow_on ? "On" : "Off",
-                            red_on ? "On" : "Off");
-
-    /* snprintf returns negative on encoding error; guard that and bounds */
-    if (response_len < 0)
-        return -EFAULT;
-    if (response_len >= (int)sizeof(response))
-        response_len = sizeof(response) - 1;
-
-    if (response_len > (int)len)
-        /* truncate to user buffer */
-        response_len = len;
+                            pedestrian_stop_active ? "Active" : "Inactive",
+                            lightbulb_check_active ? "Active" : "Inactive");
 
     if (copy_to_user(buf, response, response_len))
         return -EFAULT;
@@ -248,7 +225,6 @@ static ssize_t mytraffic_read(struct file *file, char __user *buf, size_t len, l
     *offset += response_len;
     return response_len;
 }
-
 
 static ssize_t mytraffic_write(struct file *filp, const char __user *buf, size_t count, loff_t *ppos)
 {

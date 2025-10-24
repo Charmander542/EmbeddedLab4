@@ -38,7 +38,6 @@ __attribute__((section("__versions"))) = {
 	{ 0xd260b89d, "gpiod_direction_output_raw" },
 	{ 0x47229b5c, "gpio_request" },
 	{ 0x7c32d0f0, "printk" },
-	{ 0x1e047854, "warn_slowpath_fmt" },
 	{ 0xf4fa543b, "arm_copy_to_user" },
 	{ 0xb81960ca, "snprintf" },
 	{ 0xdb7305a1, "__stack_chk_fail" },
